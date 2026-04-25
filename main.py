@@ -15,19 +15,13 @@ def run_health_server():
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO, stream=sys.stdout)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-def get_tiktok_photo_api(url):
-    """Sử dụng API hỗ trợ bóc tách ảnh TikTok"""
+def get_media_via_api(url):
+    """Sử dụng API tikwm để lấy video/ảnh cho cả TikTok và Douyin"""
     try:
-        # Sử dụng API của tikwm hoặc các bên tương tự để lấy dữ liệu ảnh
         api_url = f"https://www.tikwm.com/api/?url={url}"
-        resp = requests.get(api_url, timeout=15).json()
-        
+        resp = requests.get(api_url, timeout=20).json()
         if resp.get('code') == 0:
-            data = resp.get('data', {})
-            # Nếu là slide ảnh (images)
-            images = data.get('images', [])
-            if images:
-                return images
+            return resp.get('data', {})
     except Exception as e:
         print(f"Lỗi API: {e}")
     return None
@@ -39,29 +33,39 @@ def handle_message(update, context):
     
     url = url_match.group(1).split('?')[0]
     print(f"--- ĐANG XỬ LÝ: {url} ---", flush=True)
-    status_msg = update.message.reply_text("⏳ Đang giải mã dữ liệu TikTok...")
+    status_msg = update.message.reply_text("⏳ Đang bóc tách dữ liệu (TikTok/Douyin/Reels)...")
 
     try:
-        # ƯU TIÊN KIỂM TRA SLIDE ẢNH QUA API TRƯỚC
-        if "tiktok.com" in url:
-            images = get_tiktok_photo_api(url)
-            if images:
-                status_msg.edit_text(f"📸 Tìm thấy {len(images)} ảnh. Đang gửi cho anh...")
-                # Telegram giới hạn 10 ảnh mỗi lần gửi
-                media_group = [InputMediaPhoto(img) for img in images[:10]]
-                update.message.reply_media_group(media=media_group)
-                status_msg.delete()
-                return
+        # 1. ƯU TIÊN XỬ LÝ TIKTOK VÀ DOUYIN QUA API (VƯỢT LỖI COOKIE)
+        if "tiktok.com" in url or "douyin.com" in url:
+            data = get_media_via_api(url)
+            if data:
+                # Nếu là Slide ảnh (TikTok/Douyin đều dùng chung cấu trúc này)
+                images = data.get('images', [])
+                if images:
+                    status_msg.edit_text(f"📸 Tìm thấy {len(images)} ảnh. Đang gửi...")
+                    media_group = [InputMediaPhoto(img) for img in images[:10]]
+                    update.message.reply_media_group(media=media_group)
+                    status_msg.delete()
+                    return
+                
+                # Nếu là Video (Lấy link video không logo từ API)
+                video_url = data.get('play')
+                if video_url:
+                    status_msg.edit_text("🎥 Đang gửi video cho anh...")
+                    # Tikwm đôi khi dùng link CDN, mình gửi trực tiếp qua URL cho nhanh
+                    update.message.reply_video(video=video_url, caption="✅ Gửi anh video (No Logo)!")
+                    status_msg.delete()
+                    return
 
-        # NẾU KHÔNG PHẢI ẢNH HOẶC API THẤT BẠI, DÙNG YT-DLP TẢI VIDEO
-        status_msg.edit_text("🎥 Định dạng Video. Đang tải không logo...")
+        # 2. NẾU LÀ FACEBOOK REELS HOẶC API THẤT BẠI, DÙNG YT-DLP TẢI TRỰC TIẾP
+        status_msg.edit_text("🎥 Đang tải video (FB Reels/Instagram)...")
         file_path = f"vid_{threading.get_ident()}.mp4"
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': file_path,
             'merge_output_format': 'mp4',
             'quiet': True,
-            'nocheckcertificate': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -72,7 +76,7 @@ def handle_message(update, context):
             os.remove(file_path)
             status_msg.delete()
         else:
-            status_msg.edit_text("❌ Lỗi: Không lấy được video này.")
+            status_msg.edit_text("❌ Lỗi: Không thể lấy dữ liệu từ link này.")
 
     except Exception as e:
         print(f"Lỗi: {e}")
@@ -83,5 +87,5 @@ if __name__ == '__main__':
     updater = Updater(TOKEN, use_context=True)
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
-    print("🚀 BOT ONLINE - CHUYÊN TRỊ SLIDE ẢNH V4!", flush=True)
+    print("🚀 SIÊU BOT ĐÃ ONLINE - CHẤP HẾT COOKIE!", flush=True)
     updater.idle()

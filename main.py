@@ -6,7 +6,7 @@ import yt_dlp
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b'Bot is Running')
+        self.send_response(200); self.end_headers(); self.wfile.write(b'Bot is Online')
 
 def run_health_server():
     httpd = HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), HealthCheckHandler)
@@ -21,50 +21,57 @@ def handle_message(update, context):
     if not url_match: return
     
     url = url_match.group(1)
-    status_msg = update.message.reply_text("⏳ Đang kiểm tra link...")
+    # Làm sạch link TikTok photo
+    if "tiktok.com" in url and "/photo/" in url:
+        url = url.split('?')[0]
+
+    status_msg = update.message.reply_text("⏳ Đang kiểm tra định dạng (Video/Slide ảnh)...")
 
     try:
-        # Cấu hình yt-dlp bản chuẩn không dùng impersonate nếu server thiếu lib
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # KIỂM TRA NẾU LÀ SLIDE ẢNH (TIKTOK)
-            # Thường TikTok Slide sẽ có thông tin thumbnails rất nhiều và không có formats video
-            formats = info.get('formats', [])
-            if not formats or info.get('duration') is None:
-                images = []
-                # Lấy danh sách ảnh từ thumbnails hoặc post_thumbnails
-                temp_images = info.get('thumbnails', [])
-                for img in temp_images:
-                    # Lấy những ảnh có độ phân giải cao (thường không chứa 'm' hoặc 'p' ở cuối url của TikTok)
-                    if 'url' in img:
-                        images.append(img['url'])
+            try:
+                info = ydl.extract_info(url, download=False)
+            except Exception:
+                info = {}
+
+            # KIỂM TRA NẾU LÀ SLIDE ẢNH TIKTOK
+            if "/photo/" in url or info.get('duration') == 0 or not info.get('formats'):
+                status_msg.edit_text("📸 Đang bóc tách Slide ảnh TikTok cho anh...")
                 
-                # Lọc trùng và lấy ảnh xịn
-                unique_images = list(dict.fromkeys(images))[-10:] # Lấy 10 ảnh cuối (thường là ảnh gốc)
+                # Cách lấy ảnh thủ công nếu yt-dlp thất bại
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                response = requests.get(url, headers=headers, timeout=10).text
+                # Tìm tất cả link ảnh trong mã nguồn TikTok
+                images = re.findall(r'https://p16-sign-va\.tiktokcdn\.com/[^"& ]+', response)
+                
+                if not images:
+                    # Thử lấy từ info thumbnails nếu có
+                    images = [t['url'] for t in info.get('thumbnails', []) if 'url' in t]
 
-                if len(unique_images) > 1:
-                    status_msg.edit_text(f"📸 Đang gửi {len(unique_images)} ảnh từ Slide...")
-                    media_group = [InputMediaPhoto(img) for img in unique_images]
-                    update.message.reply_media_group(media=media_group)
-                    status_msg.delete()
-                    return
-
-            # TRƯỜNG HỢP LÀ VIDEO
-            status_msg.edit_text("🎥 Đang tải video không logo...")
+                if images:
+                    # Lọc trùng và lấy ảnh nét (thường ảnh TikTok Photo có đuôi ~c5_1080x1080)
+                    unique_images = list(dict.fromkeys(images))
+                    final_images = [img for img in unique_images if "obj/tos-maliva-p-0037" in img or "p16-sign" in img][:10]
+                    
+                    if final_images:
+                        media_group = [InputMediaPhoto(img) for img in final_images]
+                        update.message.reply_media_group(media=media_group)
+                        status_msg.delete()
+                        return
+                    
+            # TRƯỜNG HỢP TẢI VIDEO
+            status_msg.edit_text("🎥 Định dạng Video. Đang tải không logo...")
             file_path = f"vid_{threading.get_ident()}.mp4"
-            
             video_opts = {
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': file_path,
                 'merge_output_format': 'mp4',
-                'quiet': True,
             }
             with yt_dlp.YoutubeDL(video_opts) as ydl_vid:
                 ydl_vid.download([url])
@@ -75,16 +82,16 @@ def handle_message(update, context):
                 os.remove(file_path)
                 status_msg.delete()
             else:
-                status_msg.edit_text("❌ Lỗi: Không lấy được file video.")
+                status_msg.edit_text("❌ Lỗi: Không tải được video này.")
 
     except Exception as e:
         print(f"Lỗi: {e}")
-        status_msg.edit_text(f"❌ Thất bại. Link có thể bị chặn hoặc sai định dạng.\nChi tiết: {str(e)[:100]}")
+        status_msg.edit_text(f"❌ Bot bó tay với link này rồi anh! Thử link khác xem sao.\nLỗi: {str(e)[:50]}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_health_server, daemon=True).start()
     updater = Updater(TOKEN, use_context=True)
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
-    print("🚀 BOT ĐÃ ONLINE!", flush=True)
+    print("🚀 BOT ONLINE! ĐÃ CẬP NHẬT TRÌNH BÓC TÁCH ẢNH.", flush=True)
     updater.idle()

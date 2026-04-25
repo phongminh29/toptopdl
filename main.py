@@ -15,56 +15,45 @@ def run_health_server():
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO, stream=sys.stdout)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+def get_tiktok_photo_api(url):
+    """Sử dụng API hỗ trợ bóc tách ảnh TikTok"""
+    try:
+        # Sử dụng API của tikwm hoặc các bên tương tự để lấy dữ liệu ảnh
+        api_url = f"https://www.tikwm.com/api/?url={url}"
+        resp = requests.get(api_url, timeout=15).json()
+        
+        if resp.get('code') == 0:
+            data = resp.get('data', {})
+            # Nếu là slide ảnh (images)
+            images = data.get('images', [])
+            if images:
+                return images
+    except Exception as e:
+        print(f"Lỗi API: {e}")
+    return None
+
 def handle_message(update, context):
     raw_text = update.message.text
     url_match = re.search(r'(https?://[^\s]+)', raw_text)
     if not url_match: return
     
-    url = url_match.group(1)
-    print(f"--- ĐANG KIỂM TRA: {url} ---", flush=True)
-    status_msg = update.message.reply_text("⏳ Đang phân tích dữ liệu...")
+    url = url_match.group(1).split('?')[0]
+    print(f"--- ĐANG XỬ LÝ: {url} ---", flush=True)
+    status_msg = update.message.reply_text("⏳ Đang giải mã dữ liệu TikTok...")
 
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-        }
-        
-        # BƯỚC 1: GIẢI MÃ LINK RÚT GỌN (vt.tiktok.com -> tiktok.com/photo/...)
-        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-        final_url = resp.url
-        print(f"--- LINK SAU GIẢI MÃ: {final_url} ---", flush=True)
+        # ƯU TIÊN KIỂM TRA SLIDE ẢNH QUA API TRƯỚC
+        if "tiktok.com" in url:
+            images = get_tiktok_photo_api(url)
+            if images:
+                status_msg.edit_text(f"📸 Tìm thấy {len(images)} ảnh. Đang gửi cho anh...")
+                # Telegram giới hạn 10 ảnh mỗi lần gửi
+                media_group = [InputMediaPhoto(img) for img in images[:10]]
+                update.message.reply_media_group(media=media_group)
+                status_msg.delete()
+                return
 
-        # BƯỚC 2: KIỂM TRA NẾU LÀ SLIDE ẢNH (CHẠY RIÊNG KHÔNG DÙNG YT-DLP)
-        if "/photo/" in final_url or "note" in final_url:
-            status_msg.edit_text("📸 Phát hiện Slide ảnh. Đang bóc tách từng tấm...")
-            
-            # Quét link ảnh từ mã nguồn trang web
-            page_content = resp.text
-            # Tìm các link ảnh chất lượng cao trong script của TikTok
-            image_links = re.findall(r'https://p16-sign-[^"\\& ]+', page_content)
-            
-            if not image_links:
-                image_links = re.findall(r'https://p19-sign-[^"\\& ]+', page_content)
-
-            if image_links:
-                # Làm sạch và lọc trùng
-                unique_images = []
-                for img in image_links:
-                    clean_img = img.replace('\\u002F', '/')
-                    if clean_img not in unique_images:
-                        unique_images.append(clean_img)
-                
-                # Lọc lấy những ảnh có kích thước lớn (thường chứa '720x720' hoặc không có đuôi thumbnail)
-                final_images = [img for img in unique_images if "image" in img or "obj" in img][:10]
-                
-                if final_images:
-                    media_group = [InputMediaPhoto(img) for img in final_images]
-                    update.message.reply_media_group(media=media_group)
-                    status_msg.delete()
-                    return
-
-        # BƯỚC 3: NẾU LÀ VIDEO, DÙNG YT-DLP TẢI NHƯ BÌNH THƯỜNG
+        # NẾU KHÔNG PHẢI ẢNH HOẶC API THẤT BẠI, DÙNG YT-DLP TẢI VIDEO
         status_msg.edit_text("🎥 Định dạng Video. Đang tải không logo...")
         file_path = f"vid_{threading.get_ident()}.mp4"
         ydl_opts = {
@@ -72,26 +61,27 @@ def handle_message(update, context):
             'outtmpl': file_path,
             'merge_output_format': 'mp4',
             'quiet': True,
+            'nocheckcertificate': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([final_url])
+            ydl.download([url])
         
         if os.path.exists(file_path):
             with open(file_path, 'rb') as v:
-                update.message.reply_video(video=v, caption="✅ Gửi anh video!")
+                update.message.reply_video(video=v, caption="✅ Gửi anh!")
             os.remove(file_path)
             status_msg.delete()
         else:
-            status_msg.edit_text("❌ Lỗi: Không lấy được file video.")
+            status_msg.edit_text("❌ Lỗi: Không lấy được video này.")
 
     except Exception as e:
         print(f"Lỗi: {e}")
-        status_msg.edit_text(f"❌ Lỗi: Link này hiện tại TikTok chặn bóc tách.\nThử link khác xem sao anh!")
+        status_msg.edit_text(f"❌ Lỗi: {str(e)[:100]}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_health_server, daemon=True).start()
     updater = Updater(TOKEN, use_context=True)
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
-    print("🚀 BOT ĐÃ ONLINE - CHUYÊN TRỊ SLIDE ẢNH!", flush=True)
+    print("🚀 BOT ONLINE - CHUYÊN TRỊ SLIDE ẢNH V4!", flush=True)
     updater.idle()

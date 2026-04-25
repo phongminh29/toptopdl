@@ -18,49 +18,53 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 def handle_message(update, context):
     raw_text = update.message.text
     url_match = re.search(r'(https?://[^\s]+)', raw_text)
-    
     if not url_match: return
+    
     url = url_match.group(1)
-    status_msg = update.message.reply_text("⏳ Đang kiểm tra link (Video/Ảnh)...")
+    status_msg = update.message.reply_text("⏳ Đang kiểm tra link...")
 
     try:
+        # Cấu hình yt-dlp bản chuẩn không dùng impersonate nếu server thiếu lib
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'impersonate': 'chrome', # Giả lập chrome để vượt rào Douyin
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # TRƯỜNG HỢP 1: TIKTOK SLIDE ẢNH
-            if 'entries' in info or info.get('formats') is None or len(info.get('formats')) == 0:
+            # KIỂM TRA NẾU LÀ SLIDE ẢNH (TIKTOK)
+            # Thường TikTok Slide sẽ có thông tin thumbnails rất nhiều và không có formats video
+            formats = info.get('formats', [])
+            if not formats or info.get('duration') is None:
                 images = []
-                # Một số link TikTok Slide trả về danh sách entries
-                entries = info.get('entries', [info])
-                for entry in entries:
-                    if 'requested_formats' in entry: continue
-                    # Lấy link ảnh chất lượng cao nhất
-                    img_url = entry.get('url') or entry.get('thumbnails', [{}])[-1].get('url')
-                    if img_url: images.append(img_url)
+                # Lấy danh sách ảnh từ thumbnails hoặc post_thumbnails
+                temp_images = info.get('thumbnails', [])
+                for img in temp_images:
+                    # Lấy những ảnh có độ phân giải cao (thường không chứa 'm' hoặc 'p' ở cuối url của TikTok)
+                    if 'url' in img:
+                        images.append(img['url'])
                 
-                if images:
-                    status_msg.edit_text(f"📸 Phát hiện Slide ảnh ({len(images)} ảnh). Đang gửi...")
-                    media_group = [InputMediaPhoto(img) for img in images[:10]] # Telegram giới hạn 10 ảnh/album
+                # Lọc trùng và lấy ảnh xịn
+                unique_images = list(dict.fromkeys(images))[-10:] # Lấy 10 ảnh cuối (thường là ảnh gốc)
+
+                if len(unique_images) > 1:
+                    status_msg.edit_text(f"📸 Đang gửi {len(unique_images)} ảnh từ Slide...")
+                    media_group = [InputMediaPhoto(img) for img in unique_images]
                     update.message.reply_media_group(media=media_group)
                     status_msg.delete()
                     return
 
-            # TRƯỜNG HỢP 2: VIDEO (TIKTOK/DOUYIN/REELS)
+            # TRƯỜNG HỢP LÀ VIDEO
             status_msg.edit_text("🎥 Đang tải video không logo...")
             file_path = f"vid_{threading.get_ident()}.mp4"
             
             video_opts = {
-                'format': 'bestvideo+bestaudio/best',
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 'outtmpl': file_path,
                 'merge_output_format': 'mp4',
-                'impersonate': 'chrome',
-                'nocheckcertificate': True,
+                'quiet': True,
             }
             with yt_dlp.YoutubeDL(video_opts) as ydl_vid:
                 ydl_vid.download([url])
@@ -70,15 +74,17 @@ def handle_message(update, context):
                     update.message.reply_video(video=v, caption="✅ Gửi anh video!")
                 os.remove(file_path)
                 status_msg.delete()
+            else:
+                status_msg.edit_text("❌ Lỗi: Không lấy được file video.")
 
     except Exception as e:
         print(f"Lỗi: {e}")
-        status_msg.edit_text(f"❌ Không tải được. Có thể link bị riêng tư hoặc Douyin chặn IP.\nLỗi: {str(e)[:50]}...")
+        status_msg.edit_text(f"❌ Thất bại. Link có thể bị chặn hoặc sai định dạng.\nChi tiết: {str(e)[:100]}")
 
 if __name__ == '__main__':
     threading.Thread(target=run_health_server, daemon=True).start()
     updater = Updater(TOKEN, use_context=True)
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
-    print("🚀 BOT ONLINE! ĐÃ HỖ TRỢ SLIDE ẢNH.", flush=True)
+    print("🚀 BOT ĐÃ ONLINE!", flush=True)
     updater.idle()

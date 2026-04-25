@@ -2,73 +2,98 @@ import os
 import logging
 import sys
 import threading
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram.ext import Updater, MessageHandler, Filters
 import yt_dlp
 
-# --- WEB SERVER GIẢ ĐỂ DUY TRÌ RENDER ---
+# --- SERVER DUY TRÌ SỰ SỐNG CHO RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Bot is Running')
+        self.wfile.write(b'Bot is Online')
 
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+    httpd = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    httpd.serve_forever()
 
-# --- LOGIC TẢI VIDEO ĐA NỀN TẢNG ---
+# --- CẤU HÌNH LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO, stream=sys.stdout)
+logger = logging.getLogger(__name__)
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# --- HÀM TẢI VIDEO ĐA NỀN TẢNG ---
 def download_video(url):
-    video_path = 'video_download.mp4'
+    # Đặt tên file duy nhất để tránh xung đột khi nhiều người tải cùng lúc
+    output_filename = f"video_{threading.get_ident()}.mp4"
+    
     ydl_opts = {
-        # 'best' giúp lấy chất lượng tốt nhất có sẵn
+        # Ưu tiên mp4, gộp video và audio tốt nhất
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': video_path,
+        'outtmpl': output_filename,
         'quiet': True,
         'no_warnings': True,
-        # Thêm cấu hình để lách tường lửa Douyin/Facebook
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+        'merge_output_format': 'mp4',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        # Lách cơ chế chặn của Douyin/Facebook
+        'nocheckcertificate': True,
+        'extractor_args': {'tiktok': {'webpath_allow_no_video': True}},
     }
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return video_path
+    return output_filename
 
 def handle_message(update, context):
     url = update.message.text
-    # Kiểm tra xem link có thuộc các nền tảng mình muốn không
-    platforms = ["tiktok.com", "douyin.com", "facebook.com", "fb.watch"]
+    # Danh sách các nền tảng hỗ trợ
+    valid_platforms = ["tiktok.com", "douyin.com", "facebook.com", "fb.watch", "instagram.com"]
     
-    if any(p in url for p in platforms):
-        print(f"--- NHẬN LINK TỪ {url} ---", flush=True)
-        msg = update.message.reply_text("⏳ Đang lấy video cho anh (TikTok/Douyin/Reels)...")
+    if any(p in url for p in valid_platforms):
+        print(f"--- ĐANG XỬ LÝ LINK: {url} ---", flush=True)
+        status_msg = update.message.reply_text("⏳ Đang tải và xử lý video cho anh...")
+        
+        file_path = None
         try:
-            path = download_video(url)
-            if os.path.exists(path):
-                update.message.reply_video(video=open(path, 'rb'), caption="✅ Gửi anh video!")
-                os.remove(path)
-                msg.delete()
+            file_path = download_video(url)
+            
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as video:
+                    update.message.reply_video(video=video, caption="✅ Video của anh đây!")
+                status_msg.delete()
             else:
-                msg.edit_text("❌ Lỗi: Không tìm thấy file video.")
+                status_msg.edit_text("❌ Lỗi: Không thể tạo file video.")
+                
         except Exception as e:
             print(f"Lỗi: {e}", flush=True)
-            msg.edit_text(f"❌ Lỗi xử lý: {str(e)}")
+            status_msg.edit_text(f"❌ Bot gặp lỗi khi tải: {str(e)}")
+        finally:
+            # Xóa file sau khi gửi để nhẹ server
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
     else:
-        # Phản hồi nhẹ nếu link không hợp lệ
         if "http" in url:
-            update.message.reply_text("Hỗ trợ TikTok, Douyin và Facebook Reels thôi anh nhé!")
+            update.message.reply_text("Em chỉ hỗ trợ: TikTok, Douyin, Facebook Reels và Instagram thôi ạ!")
 
 if __name__ == '__main__':
+    # Chạy server web phụ
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    print("🚀 BOT ĐANG KHỞI CHẠY BẢN UPDATE...", flush=True)
+    print("🚀 BOT ĐANG KHỞI CHẠY (MULTILINGUAL BẢN CHUẨN)...", flush=True)
+    
+    if not TOKEN:
+        print("❌ THIẾU TELEGRAM_TOKEN!", flush=True)
+        sys.exit(1)
+
     updater = Updater(TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     
     updater.start_polling()
-    print("✅ BOT ĐÃ ONLINE (TikTok/Douyin/Reels)!", flush=True)
+    print("✅ HỆ THỐNG ĐÃ ONLINE!", flush=True)
     updater.idle()

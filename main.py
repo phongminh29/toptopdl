@@ -44,7 +44,7 @@ def download_video(url):
         'nocheckcertificate': True,
         'ignoreerrors': False,
         # Nếu anh có file cookies.txt cho Douyin, hãy bỏ dấu # ở dòng dưới:
-        # 'cookiefile': 'cookies.txt', 
+         'cookiefile': 'cookies.txt', 
     }
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
